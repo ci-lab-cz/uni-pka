@@ -10,6 +10,7 @@ from collections import defaultdict, OrderedDict
 from functools import partial
 from multiprocessing import Pool, cpu_count
 from typing import Dict, List, Tuple, Union, Optional, Callable
+from pprint import pprint
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,7 @@ from rdkit.Chem import (
     RemoveHs,
     RWMol,
     SanitizeMol,
+    rdDistGeom,
 )
 
 
@@ -86,6 +88,59 @@ DICT_CHARGE = '''[PAD]
 1
 0
 -1'''
+
+
+def validate_stereo_fast(smiles, seeds=(1, 7), timeout_s=1):
+    mol = Chem.MolFromSmiles(smiles, sanitize=True)
+    if mol is None:
+        return False
+        # return False, {"reason": "SMILES parse/sanitize failed"}
+
+    # stereo explicitly present in input
+    # a0 = {a.GetIdx() for a in mol.GetAtoms()
+    #       if a.GetChiralTag() != Chem.rdchem.ChiralType.CHI_UNSPECIFIED}
+    # b0 = {b.GetIdx() for b in mol.GetBonds()
+    #       if b.GetStereo() not in (Chem.rdchem.BondStereo.STEREONONE,
+    #                                Chem.rdchem.BondStereo.STEREOANY)}
+    #
+    # # removes impossible/contradictory stereo markings
+    # Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
+    #
+    # a1 = {a.GetIdx() for a in mol.GetAtoms()
+    #       if a.GetChiralTag() != Chem.rdchem.ChiralType.CHI_UNSPECIFIED}
+    # b1 = {b.GetIdx() for b in mol.GetBonds()
+    #       if b.GetStereo() not in (Chem.rdchem.BondStereo.STEREONONE,
+    #                                Chem.rdchem.BondStereo.STEREOANY)}
+    #
+    # if (a0 - a1) or (b0 - b1):
+    #     return False, {
+    #         "reason": "invalid/contradictory stereo annotation",
+    #         "dropped_atom_centers": sorted(a0 - a1),
+    #         "dropped_bond_stereo": sorted(b0 - b1),
+    #     }
+
+    # fast geometric feasibility probe (heavy atoms only)
+    # last_fail = None
+    for seed in seeds:
+        probe = Chem.Mol(mol)
+        p = AllChem.ETKDGv3()
+        p.enforceChirality = True
+        p.randomSeed = seed
+        p.maxIterations = 50
+        p.trackFailures = True
+        if hasattr(p, "timeout"):
+            p.timeout = timeout_s
+
+        if AllChem.EmbedMolecule(probe, p) >= 0:
+            return True
+            # return True, {"reason": "DG-feasible stereo"}
+
+        # if hasattr(p, "GetFailureCounts"):
+        #     vals = rdDistGeom.EmbedFailureCauses.values
+        #     last_fail = {str(vals[i]): c for i, c in enumerate(p.GetFailureCounts()) if c}
+
+    return False
+    # return False, {"reason": "no feasible quick embedding", "embed_failures": last_fail}
 
 
 class MolDataset(Dataset):
@@ -345,7 +400,7 @@ def inner_smi2coords(smi, seed=42, mode='fast', remove_hs=True):
     :raises AssertionError: If no atoms are present in the molecule or if the coordinates do not align with the atom count.
     '''
 
-    q = datetime.datetime.now()
+    qtime = datetime.datetime.now()
 
     mol = Chem.MolFromSmiles(smi)
     mol = AllChem.AddHs(mol)
@@ -354,38 +409,44 @@ def inner_smi2coords(smi, seed=42, mode='fast', remove_hs=True):
         atoms.append(atom.GetSymbol())
         charges.append(atom.GetFormalCharge())
     assert len(atoms) > 0, 'No atoms in molecule: {}'.format(smi)
+
     try:
-        # will random generate conformer with seed equal to -1. else fixed random seed.
-        res = AllChem.EmbedMolecule(mol, randomSeed=seed)
-        if res == 0:
-            try:
-                # some conformer can not use MMFF optimize
-                AllChem.MMFFOptimizeMolecule(mol)
-                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-            except:
-                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-        ## for fast test... ignore this ###
-        elif res == -1 and mode == 'heavy':
-            AllChem.EmbedMolecule(mol, maxAttempts=5000, randomSeed=seed)
-            try:
-                # some conformer can not use MMFF optimize
-                AllChem.MMFFOptimizeMolecule(mol)
-                coordinates = mol.GetConformer().GetPositions().astype(np.float32)
-            except:
+        if validate_stereo_fast(smi, timeout_s=5):
+            # will random generate conformer with seed equal to -1. else fixed random seed.
+            res = AllChem.EmbedMolecule(mol, randomSeed=seed)
+            if res == 0:
+                try:
+                    # some conformer can not use MMFF optimize
+                    AllChem.MMFFOptimizeMolecule(mol)
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+                except:
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+            ## for fast test... ignore this ###
+            elif res == -1 and mode == 'heavy':
+                AllChem.EmbedMolecule(mol, maxAttempts=5000, randomSeed=seed)
+                try:
+                    # some conformer can not use MMFF optimize
+                    AllChem.MMFFOptimizeMolecule(mol)
+                    coordinates = mol.GetConformer().GetPositions().astype(np.float32)
+                except:
+                    AllChem.Compute2DCoords(mol)
+                    coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
+                    coordinates = coordinates_2d
+            else:
                 AllChem.Compute2DCoords(mol)
                 coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
                 coordinates = coordinates_2d
+                logger.warning(f"Failed to generate conformer, replace with 2D coordinates: {smi}")
         else:
             AllChem.Compute2DCoords(mol)
             coordinates_2d = mol.GetConformer().GetPositions().astype(np.float32)
             coordinates = coordinates_2d
+            logger.warning(f"Failed to generate conformer, replace with 2D coordinates: {smi}")
     except:
-        print("Failed to generate conformer, replace with zeros.")
+        logger.warning(f"Failed to generate conformer, replace with zeros: {smi}")
         coordinates = np.zeros((len(atoms), 3))
 
-    logger.info(f'{datetime.datetime.now() - q}s: {smi}')  # CHECKPOINT 2
-    # sys.stderr.write(f'{datetime.datetime.now() - q}s: {smi}\n')
-    # sys.stderr.flush()
+    logger.info(f'{datetime.datetime.now() - qtime}s: {smi}')  # CHECKPOINT 2
 
     assert len(atoms) == len(coordinates), "coordinates shape is not align with {}".format(smi)
     if remove_hs:
@@ -1236,7 +1297,7 @@ def get_ensemble(smi: str, template_a2b: pd.DataFrame, template_b2a: pd.DataFram
         traceback.print_exc()
         ensemble = dict()
 
-    print(f'time {datetime.datetime.now() - time_}s | {smi} | {sum(len(v) for v in ensemble.values())}')  # CHECKPOINT 1
+    # logging.info(f'time {datetime.datetime.now() - time_}s | {smi} | {sum(len(v) for v in ensemble.values())}')  # CHECKPOINT 1
 
     return smi, ensemble
 
@@ -1303,7 +1364,7 @@ def predict_ensemble_free_energy(smi_list: List, template_a2b: pd.DataFrame, tem
             for q, microstates in ensemble.items():
                 for microstate in microstates:
                     rows.append((smi, q, microstate))
-            print(len(rows))
+            # print(len(rows))
     df = pd.DataFrame(rows, columns=["smi", "charge", "microstate"])
     df = df.set_index("microstate", drop=False)
 
@@ -2014,7 +2075,7 @@ def calc_all(items, template_a2b, template_b2a, predictor, pH=7.4):
         res = predict_ensemble_free_energy([item[0] for item in items], template_a2b, template_b2a, predictor)
         logger.info('predict_ensemble_free_energy was finished...')
 
-        # print(res)
+        # pprint(res)
         # print(res.keys())
 
         logger.info('get_major_form_from_ensemble was started...')
