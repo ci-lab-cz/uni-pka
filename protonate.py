@@ -446,7 +446,7 @@ def inner_smi2coords(smi, seed=42, mode='fast', remove_hs=True):
         logger.warning(f"Failed to generate conformer, replace with zeros: {smi}")
         coordinates = np.zeros((len(atoms), 3))
 
-    logger.info(f'{datetime.datetime.now() - qtime}s: {smi}')  # CHECKPOINT 2
+    logger.info(f'{datetime.datetime.now() - qtime}s | conformer generation | {smi}')  # CHECKPOINT 2
 
     assert len(atoms) == len(coordinates), "coordinates shape is not align with {}".format(smi)
     if remove_hs:
@@ -1297,7 +1297,7 @@ def get_ensemble(smi: str, template_a2b: pd.DataFrame, template_b2a: pd.DataFram
         traceback.print_exc()
         ensemble = dict()
 
-    # logging.info(f'time {datetime.datetime.now() - time_}s | {smi} | {sum(len(v) for v in ensemble.values())}')  # CHECKPOINT 1
+    logging.info(f'time {datetime.datetime.now() - time_}s | microspecies enumeration | {smi} | {sum(len(v) for v in ensemble.values())}')  # CHECKPOINT 1
 
     return smi, ensemble
 
@@ -1438,8 +1438,6 @@ class FreeEnergyPredictor(object):
                                 shuffle=False,
                                 collate_fn=self.model.batch_collate_fn,
                                 )
-
-
 
         all_energies = []
         for i, batch in enumerate(dataloader):
