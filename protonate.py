@@ -2206,28 +2206,32 @@ def main():
     template_a2b, template_b2a = read_template(args.templates)
     sorted_input_file = f"{args.output}.rearranged.tsv"
     input_for_processing = make_rearranged_input_file(args.input, args.templates, sorted_input_file)
-    
-    items = []
-    with open(input_for_processing) as f:
-        with open(args.output, "wt") as fout:
-            for i, line in enumerate(f, 1):
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) < 2:
-                    continue
-                items.append(parts[:2])
-                if i % 1000 == 0:
-                    for smi, prot_smi, mol_name in calc_all(items, template_a2b, template_b2a, predictor, args.pH):
-                        if prot_smi:
-                            fout.write(f'{prot_smi}\t{mol_name}\n')
-                            fout.flush()
-                        else:
-                            sys.stderr.write(f'Molecule {mol_name} caused an error\n')
-                    items = []
-            # last batch
-            for smi, prot_smi, mol_name in calc_all(items, template_a2b, template_b2a, predictor, args.pH):
-                if prot_smi:
-                    fout.write(f'{prot_smi}\t{mol_name}\n')
-                    fout.flush()
+
+    try:
+        items = []
+        with open(input_for_processing) as f:
+            with open(args.output, "wt") as fout:
+                for i, line in enumerate(f, 1):
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 2:
+                        continue
+                    items.append(parts[:2])
+                    if i % 1000 == 0:
+                        for smi, prot_smi, mol_name in calc_all(items, template_a2b, template_b2a, predictor, args.pH):
+                            if prot_smi:
+                                fout.write(f'{prot_smi}\t{mol_name}\n')
+                                fout.flush()
+                            else:
+                                sys.stderr.write(f'Molecule {mol_name} caused an error\n')
+                        items = []
+                # last batch
+                for smi, prot_smi, mol_name in calc_all(items, template_a2b, template_b2a, predictor, args.pH):
+                    if prot_smi:
+                        fout.write(f'{prot_smi}\t{mol_name}\n')
+                        fout.flush()
+    finally:
+        if os.path.exists(sorted_input_file):
+            os.remove(sorted_input_file)
 
 
 if __name__ == '__main__':
