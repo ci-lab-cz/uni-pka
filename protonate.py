@@ -962,6 +962,101 @@ def read_template(template_file: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return template_a2b, template_b2a
 
 
+def read_smiles_name_tsv(input_file: str) -> List[Tuple[str, str]]:
+    """
+    Read a tab-separated SMILES file with exactly two columns:
+    SMILES and molecule name.
+    """
+    records = []
+    with open(input_file) as f:
+        for line_no, line in enumerate(f, 1):
+            row = line.strip()
+            if not row:
+                continue
+            parts = row.split("\t")
+            if len(parts) < 2:
+                raise ValueError(
+                    f"Input file must have at least 2 tab-separated columns (SMILES and name). "
+                    f"Invalid format at line {line_no}: {row}"
+                )
+            smi = parts[0].strip()
+            name = parts[1].strip()
+            if not smi:
+                raise ValueError(f"Empty SMILES at line {line_no}")
+            if not name:
+                raise ValueError(f"Empty molecule name at line {line_no}")
+            records.append((smi, name))
+    return records
+
+
+def get_template_patterns(template_file: str) -> List[Mol]:
+    """
+    Read SMARTS patterns from template file.
+    """
+    template = pd.read_csv(template_file, sep="\t")
+    if "SMARTS" not in template.columns:
+        raise ValueError(f"Template file {template_file} does not contain SMARTS column")
+
+    patterns = []
+    invalid_smarts = 0
+    for smarts in template["SMARTS"]:
+        smarts = str(smarts).strip()
+        if not smarts or smarts == "nan":
+            continue
+        pattern = MolFromSmarts(smarts)
+        if pattern is None:
+            invalid_smarts += 1
+            continue
+        patterns.append(pattern)
+
+    if len(patterns) == 0:
+        raise ValueError(f"No valid SMARTS patterns found in {template_file}")
+    if invalid_smarts:
+        logger.warning(f"Skipped {invalid_smarts} invalid SMARTS patterns from {template_file}")
+    return patterns
+
+
+def count_total_pattern_matches(smi: str, patterns: List[Mol]) -> int:
+    """
+    Count total number of SMARTS match occurrences for one SMILES.
+    Hydrogens are added before substructure matching.
+    """
+    mol = MolFromSmiles(smi)
+    if mol is None:
+        return 0
+    mol = AddHs(mol)
+    total_matches = 0
+    for pattern in patterns:
+        total_matches += len(mol.GetSubstructMatches(pattern))
+    return total_matches
+
+
+def make_rearranged_input_file(input_file: str, template_file: str, output_file: str) -> str:
+    """
+    Build sorted input file with columns: SMILES, name, total pattern matches.
+    Sorted by total pattern matches in descending order.
+    """
+    records = read_smiles_name_tsv(input_file)
+    patterns = get_template_patterns(template_file)
+
+    ranked_records = []
+    for idx, (smi, name) in enumerate(records):
+        total_matches = count_total_pattern_matches(smi, patterns)
+        ranked_records.append((idx, smi, name, total_matches))
+
+    ranked_records = sorted(ranked_records, key=lambda x: (-x[3], x[0]))
+
+    with open(output_file, "wt") as fout:
+        for _, smi, name, total_matches in ranked_records:
+            fout.write(f"{smi}\t{name}\t{total_matches}\n")
+
+    logger.info(
+        f"Prepared sorted input file {output_file} with {len(ranked_records)} molecules "
+        f"(sorted by total SMARTS matches)."
+    )
+    return output_file
+
+
 FILTER_PATTERNS = list(map(MolFromSmarts, [
     "[#6X5]",
     "[#7X5]",
@@ -2109,12 +2204,17 @@ def main():
     predictor = FreeEnergyPredictor(args.model, batch_size=16, pool=pool)
 
     template_a2b, template_b2a = read_template(args.templates)
+    sorted_input_file = f"{args.output}.rearranged.tsv"
+    input_for_processing = make_rearranged_input_file(args.input, args.templates, sorted_input_file)
     
     items = []
-    with open(args.input) as f:
+    with open(input_for_processing) as f:
         with open(args.output, "wt") as fout:
             for i, line in enumerate(f, 1):
-                items.append(line.strip().split()[:2])
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 2:
+                    continue
+                items.append(parts[:2])
                 if i % 1000 == 0:
                     for smi, prot_smi, mol_name in calc_all(items, template_a2b, template_b2a, predictor, args.pH):
                         if prot_smi:
