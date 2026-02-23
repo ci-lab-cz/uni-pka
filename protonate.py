@@ -2198,9 +2198,10 @@ def main():
     args = parser.parse_args()
 
     if args.ncpu is None:
-        pool = Pool(cpu_count())
+        ncpu = cpu_count()
     else:
-        pool = Pool(min(max(1, args.ncpu), cpu_count()))
+        ncpu = min(max(1, args.ncpu), cpu_count())
+    pool = Pool(ncpu)
     predictor = FreeEnergyPredictor(args.model, batch_size=16, pool=pool)
 
     template_a2b, template_b2a = read_template(args.templates)
@@ -2216,7 +2217,7 @@ def main():
                     if len(parts) < 2:
                         continue
                     items.append(parts[:2])
-                    if i % 1000 == 0:
+                    if i % ncpu * 100 == 0:
                         for smi, prot_smi, mol_name in calc_all(items, template_a2b, template_b2a, predictor, args.pH):
                             if prot_smi:
                                 fout.write(f'{prot_smi}\t{mol_name}\n')
