@@ -39,14 +39,7 @@ from rdkit.Chem import (
 
 RDLogger.DisableLog('rdApp.*')
 warnings.filterwarnings(action='ignore')
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    level=os.environ.get("LOGLEVEL", "INFO").upper(),
-    stream=sys.stdout,
-)
-logger = logging.getLogger("unimol_free_energy.inference")
-# logging.disable(50)
+logger = logging.getLogger("uni-pka")
 
 LN10 = math.log(10)
 TRANSLATE_PH = 6.504894871171601
@@ -446,7 +439,7 @@ def inner_smi2coords(smi, seed=42, mode='fast', remove_hs=True):
         logger.warning(f"Failed to generate conformer, replace with zeros: {smi}")
         coordinates = np.zeros((len(atoms), 3))
 
-    logger.info(f'{datetime.datetime.now() - qtime}s | conformer generation | {smi}')  # CHECKPOINT 2
+    logger.debug(f'{datetime.datetime.now() - qtime}s | conformer generation | {smi}')  # CHECKPOINT 2
 
     assert len(atoms) == len(coordinates), "coordinates shape is not align with {}".format(smi)
     if remove_hs:
@@ -1392,7 +1385,7 @@ def get_ensemble(smi: str, template_a2b: pd.DataFrame, template_b2a: pd.DataFram
         traceback.print_exc()
         ensemble = dict()
 
-    logging.info(f'time {datetime.datetime.now() - time_}s | microspecies enumeration | {smi} | {sum(len(v) for v in ensemble.values())}')  # CHECKPOINT 1
+    logging.debug(f'time {datetime.datetime.now() - time_}s | microspecies enumeration | {smi} | {sum(len(v) for v in ensemble.values())}')  # CHECKPOINT 1
 
     return smi, ensemble
 
@@ -1448,25 +1441,16 @@ def predict_ensemble_free_energy(smi_list: List, template_a2b: pd.DataFrame, tem
 
     # print(smi_list)
 
-    logger.info(f'predict microstates started {len(smi_list)}')
-    # print(f'predict microstates started {len(smi_list)}')
+    logger.info(f'predict microstates started: {len(smi_list)} structures')
 
     rows = []
     with Pool(cpu_count()) as p:
         for smi, ensemble in p.imap_unordered(partial(get_ensemble, template_a2b=template_a2b, template_b2a=template_b2a), smi_list, chunksize=1):
-            # print(smi)
-            # print(sum(len(v) for v in ensemble.values()))
             for q, microstates in ensemble.items():
                 for microstate in microstates:
                     rows.append((smi, q, microstate))
-            # print(len(rows))
     df = pd.DataFrame(rows, columns=["smi", "charge", "microstate"])
     df = df.set_index("microstate", drop=False)
-
-    # print(df)
-    # print(df.shape)
-    # print(len(set(df['smi'])))
-
     logger.info(f'predicted microstates {len(set(df["smi"]))}')
     print(f'predict microstates {len(set(df["smi"]))}')
 
@@ -2194,8 +2178,22 @@ def main():
                         help="Model file")
     parser.add_argument('--pH', type=float, default=7.4, help="pH value")
     parser.add_argument('-c', '--ncpu', type=int, default=None, help="number of CPU")
+    parser.add_argument(
+        '--log-level',
+        default=os.environ.get("LOGLEVEL", "INFO"),
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level",
+    )
 
     args = parser.parse_args()
+
+    logging.basicConfig(
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        level=args.log_level,
+        stream=sys.stdout,
+    )
+    logger.setLevel(args.log_level)
 
     if args.ncpu is None:
         ncpu = cpu_count()
